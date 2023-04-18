@@ -1,0 +1,545 @@
+---
+title: "II Projekt zaliczeniowy"
+author: "Ksawery Mielczarek"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(reshape)
+library(glmnet)
+library(caret)
+library(randomForest)
+```
+
+```{r}
+Xtrain <- read.csv("X_train.csv")
+Xtest <- read.csv("X_test.csv")
+Ytrain <- read.csv("y_train.csv")
+```
+
+# 1. Wstepna analiza danych
+
+## a) Opis danych
+
+Zebrane zostały dane dotyczące 4464 komórek pobranych ze szpiku ludzkich dawców. Dla każdej komórki zmierzono ekspresję 9000 genów (która to ekspresja mierzona była w liczbie zliczeń odpowiednich transkryptów RNA) oraz liczbę wystąpień białka powierzchniowego CD36. Uzyskane dane zapisano w trzech osobnych ramkach danych. Trzymając się oznaczeń używanych w tym raporcie: ramka "Xtrain" zawiera pomiary ekspresji genów wykonane dla pewnych 3794 komórek, a ramka "Xtest" pomiary wykonane dla pozostałych 670 komórek. Dodatkowo w ramce "Ytrain" przedstawiono zmierzoną ilośc białka CD36 tych samych komórek, których ekspresja została podana w ramce "Xtrain". Końcowym celem niniejszej analizy była predykcja liczby zliczeń białka CD36 dla komórek z ramki "Xtest".
+
+Niestety w przypadku żadnej ramki nie podano jednostki, w której zostały podane zawarte w niej dane. Uważa się to za spore niedopatrzenie, ponieważ m. in. nie można stwierdzić stwierdzić, czy powodem tego, że dane w ramkach "Xtrain" i "Xtest" mają charakter ciągły (wbrew deklaracji, że reprezentują zliczenia), jest ich przeskalowanie, inna nieliniowa transformacja, czy też istnieje bardziej złożona przyczyna.
+
+Przed przystąpieniem do właściwej analizy sprawdzono, czy ramki danych zostały poprawnie przygotowane. Upewniono się na początku, czy analizowane ramki danych nie zawierają brakujących wartości.
+
+```{r}
+if(length( Xtest[is.na(Xtest)] )==0) {print("W ramce Xtest nic nie brakuje.")}
+if(length( Xtrain[is.na(Xtrain)] )==0) {print("W ramce Xtrain nic nie brakuje.")}
+if(length( Ytrain[is.na(Ytrain)] )==0) {print("W ramce Ytrain nic nie brakuje.")}
+```
+
+A następnie przetestowano, czy wszystkie dane są typu "numeric".
+
+```{r}
+if(length( Xtest[is.numeric(Xtest)] )==0) {print("Wszystkie dane w ramce Xtest mają poprawny typ.")}
+if(length( Xtrain[is.numeric(Xtrain)] )==0) {print("Wszystkie dane w ramce Xtrain mają poprawny typ.")}
+if(length( Ytrain[is.numeric(Ytrain)] )==0) {print("Wszystkie dane w ramce Ytrain mają poprawny typ.")}
+```
+
+Nie zaobserwowano w danych żadnego bardziej niepokojącego zjawiska, dlatego zadecydowano o przejściu do następnej części analizy.
+
+## b) Charakterystyka ramki "Ytrain"
+
+Przystąpiono do analizy danych pomiarowych dotyczących zmiennej objaśnianej, tj. liczby zliczeń białka CD36 w badanych komórkach. Na początku dane zwizualizowano na histogramie.
+
+```{r}
+hist(as.matrix(Ytrain),xlab="Zliczenia białka CD36", ylab="Częstość", main="Wykres 1 - histogram zliczeń białka CD36", breaks=50)
+```
+
+Patrząc na histogram można od razu stwierdzić, że dla dużej liczby komórek nie zmierzono w ogóle obecności białka CD36 na ich powierzchni. Zastanawiający jest również gwałtowny skok zliczeń odpowiadający wartość ok. 0.25.
+
+Uzyskane dane charakteryzowała zmienność w zakresie od:
+
+```{r}
+min(Ytrain)
+```
+
+do:
+
+```{r}
+max(Ytrain)
+```
+
+ze średnią wartością równą:
+
+```{r}
+mean(as.matrix(Ytrain))
+```
+
+oraz medianą równą:
+
+```{r}
+median(as.matrix(Ytrain))
+```
+
+zmienność danych scharakteryzowano dodatkowo poprzez ich wariancję:
+
+```{r}
+var(as.matrix(Ytrain))[1,1]
+```
+
+Obliczono jeszcze, dla jakiego odsetka badanych komórek nie zmierzono w ogóle obecności białka CD36:
+
+```{r}
+length(Ytrain[as.matrix(Ytrain)==0])/length(as.matrix(Ytrain))
+```
+
+## c) Badanie występujących korelacji
+
+Przystąpiono do wyboru genów, których ekspresja jest najbardziej skorelowana z obecnością białka CD36. Ograniczono się do liczby 250 najbardziej skorelowanych genów, których indeksy wybrano dzięki poniższemu kodowi.
+
+```{r}
+CORR<-cor(Ytrain,Xtrain[,1])
+for(i in 2:3794)
+{
+  CORR<-c(CORR,cor(Ytrain,Xtrain[,i]))
+}
+sCORR<-sort(CORR, decreasing=TRUE)
+indxCORR<-(1:3794)[CORR>=sCORR[250]]
+```
+
+Następnie utworzono tzw. mapę ciepła prezentującą poziom korelacji między wybranymi w ten sposób genami.
+
+```{r}
+matrixCORR<-cor(Xtrain[indxCORR],rev(Xtrain[indxCORR]))
+dfCORR<-melt(matrixCORR)
+colnames(dfCORR)<-c("x","y","Korelacja")
+
+ggplot(dfCORR, aes(x,y,fill=Korelacja)) +
+  geom_tile() +
+  scale_fill_gradient2(low="yellow", mid="red", high="black", midpoint=0.2) + 
+  theme(
+    axis.text.x=element_blank(),
+    axis.text.y=element_blank(),
+    axis.ticks.x=element_blank(),
+    axis.ticks.y=element_blank(),
+    axis.title.x=element_blank(),
+    axis.title.y=element_blank(),
+  ) +
+  ggtitle("Wykres 2 - Mapa ciepła macierzy korelacji")
+
+
+```
+
+Na Wykresie 2 widoczna jest charakterystyczna ukośna czarna linia, która odpowiada korelacji równej 1 - co zachodzi dla tych komórek mapy ciepła, dla których obliczono korelację wektora z nim samym. Jednakże poza tym wykres jest w wysokim stopniu nieinterpretowalny - duża liczba punktów (250x250) uniemożliwia odczytanie wartości korelacji dla poszczególnych komórek, a skokowa nieciągłość funkcji korelacji względem kolejnych genów znacząco ogranicza możliwość wyodrębnienia pewnych tendencji lub trendów w danych. Ostatni problem jest uwypuklony przez fakt, że analizowany jest niewielki i nieciągły podzbiór genów.
+
+# 2. Analiza danych z wykorzystaniem modelu *Elastic Net*
+
+## a) Opis metody *Elastic Net*
+
+*Elastic Net* jest, podobnie jak metoda *LASSO* oraz metoda *regresji brzegowej*, metodą rozwiązywania nadokreślonych układów równań liniowych postaci: $$
+X\beta=Y
+$$ gdzie macierz obserwacji zmiennych objaśniających $X\in\mathbb{R}^{m\times n}$, wektor obserwacji zmiennej objasnianej $Y\in\mathbb{R}^n$, a wektor poszukiwanych parametrów $\beta\in\mathbb{R}^m$. Układ ten jest nadokreślony naturalnie wtw. gdy $n>m$.
+
+W metodzie *Elastic Net* wybór "najlepszego" wektora parametrów $\beta$ odbywa się poprzez minimalizację funkcjonału $F:\mathbb{R}^m\to\mathbb{R}$ zadanego wzorem:
+
+$$
+F(\beta)=||X\beta-Y||^2_2+\lambda_1||\beta||_1+\lambda_2||\beta||^2_2
+$$
+
+Sposób wyboru hiperparametrów $\lambda_1$ i $\lambda_2$ nie jest zdefiniowany i musi zostać określony poniekąd arbitralnie. Minimalizację funkcjonału $F$ względem $\beta$ wykonuje się dla ustalonych wartości hiperparametrów. Funkcjonał ten jest wypukły, co oznacza, że zadanie minimalizacji jest dobrze postawione i posiada jednoznaczne rozwiązanie.
+
+Warto dodatkowo zauważyć, że dla wartości $\lambda_1=0$ metoda *Elastic Net* degeneruje się do regresji grzbietowej, a dla wartości $\lambda_2=0$ do metody *LASSO*. Jeśli oba te hiperparametry się zerują, to problem sprowadza się do rozwiązania pierwotnego równania metodą najmniejszych kwadratów.
+
+## b) Wybór hiperparametrów modelu *Elastic Net*
+
+Ze względów technicznych zamiast hiperparametrów $\lambda_1$ i $\lambda_2$ szukano optymalnych wartości zmiennych $\lambda$ i $\alpha$, które wiążą się z początkowymi hiperparametrami poprzez zależności: $$
+\lambda_1=\lambda\alpha,\qquad\lambda_2=\frac{\lambda(1-\alpha)}{2}
+$$ gdzie $\lambda>0$ i $\alpha\in[0,1]$. Testowano dyskretne wartości parametrów $\lambda$ i $\alpha$, które to wybrano tak, by pokrywały równomiernie cały zbiór wartości, które potencjalnie mogłyby przyjąć. Rozpatrywano wartości hiperparametrów ze zbiorów: $$
+\alpha\in\{0,0.2,0.4,0.6,0.8,1\}\\
+\lambda\in\{10^x\in\mathbb{R}_+:x\in\{-5,-4.75,-4.5,...,4.5,4.75,5\}\}
+$$Dla każdej wartości $\alpha$ znajdowano optymalną wartość $\lambda$ za pomocą kroswalidacji z podziałem na 3 podzbiorów. W przypadku dużych zbiorów danych literatura sugeruje podzielić dane na 5 lub 10 podzbiorów, jednakże zdecydowano o podziale na tylko 3 podzbiory, by późniejsze obliczenia, przeprowadzone dla metody lasów losowych, zostały ukończone w rozsądnym czasie, umożliwiającym ewentualne poprawki. Podziału na podzbiory dokonano zgodnie z poniższym kodem.
+
+```{r}
+set.seed(2137)
+podzbiory<-sample(1:5,3794,replace=TRUE)
+table(podzbiory)
+```
+
+Jak widać podzbiory nie są równoliczne, lecz nie powinno stanowic to problemu.
+
+Następnie dla każdej z wartości $\alpha$ dokonano regresję względem $\lambda$ i dla jej najbardziej optymalnej wartości obliczono błąd walidacyjny. Wybrano ostatecznie wartość $\alpha$ dla której błąd ten był najmniejszy.
+
+```{r}
+lambdas<-10^seq(-5,5,0.25)
+
+#przypadek alfa=0.0
+cv0.0<-cv.glmnet(x=as.matrix(Xtrain), y=as.matrix(Ytrain), nfolds=5,lambda=lambdas, alpha=0, intercept=FALSE, foldid=podzbiory) #tu przeprowadzamy kroswalidacje
+cv.error<-cv0.0$cvm[ match(cv0.0$lambda.min,cv0.0$lambda) ]#a tu znajdujemy blad walidacyjny
+
+#przypadek alfa=0.2
+cv0.2<-cv.glmnet(x=as.matrix(Xtrain), y=as.matrix(Ytrain), nfolds=5, lambda=lambdas, alpha=0.2, intercept=FALSE, foldid=podzbiory)
+cv.error<-c(cv.error,cv0.2$cvm[ match(cv0.2$lambda.min,cv0.2$lambda) ])
+
+#przypadek alfa=0.4
+cv0.4<-cv.glmnet(x=as.matrix(Xtrain), y=as.matrix(Ytrain), nfolds=5,lambda=lambdas, alpha=0.4, intercept=FALSE, foldid=podzbiory)
+cv.error<-c(cv.error,cv0.4$cvm[ match(cv0.4$lambda.min,cv0.4$lambda) ] )
+
+#przypadek alfa=0.6
+cv0.6<-cv.glmnet(x=as.matrix(Xtrain), y=as.matrix(Ytrain), nfolds=5 ,lambda=lambdas, alpha=0.6, intercept=FALSE, foldid=podzbiory)
+cv.error<-c(cv.error,cv0.6$cvm[ match(cv0.6$lambda.min,cv0.6$lambda) ] )
+
+#przypadek alfa=0.8
+cv0.8<-cv.glmnet(x=as.matrix(Xtrain), y=as.matrix(Ytrain), nfolds=5 ,lambda=lambdas, alpha=0.8, intercept=FALSE, foldid=podzbiory)
+cv.error<-c(cv.error,cv0.8$cvm[ match(cv0.8$lambda.min,cv0.8$lambda) ] )
+
+#przypadek alfa=1.0
+cv1.0<-cv.glmnet(x=as.matrix(Xtrain), y=as.matrix(Ytrain), nfolds=5 ,lambda=lambdas, alpha=1.0, intercept=FALSE, foldid=podzbiory)
+cv.error<-c(cv.error,cv1.0$cvm[ match(cv1.0$lambda.min,cv1.0$lambda) ] )
+```
+
+Zminimalizowano błąd walidacyjny dla wartości $\alpha$ równej:
+
+```{r}
+print(match(min(cv.error),cv.error)*0.2-0.2)
+```
+
+dla której to wartości optymalną wartością $\lambda$ było:
+
+```{r}
+print(cv0.2$lambda.min)
+```
+
+## c) Przewidywania modelu *Elastic Net*
+
+Z obliczonymi w punkcie b) hiperparametrami $\alpha$ i $\lambda$ możliwe było stworzenie modelu zależności występowania białka CD36 od ekspresji genów w komórce. Zgodnie z nim stwierdzono, że istnieje
+
+```{r}
+en_coef<-coef(cv0.6,cv0.6$lambda.min)
+en_coef<-en_coef[-1]
+length(en_coef[en_coef!=0])
+```
+
+genów, dla których występuje taka nietrywialna zależność. Liczba ta jest duża, co pozwala wysunąć hipotezę o przeuczeniu modelu. W przekonaniu tym utwierdza histogram bezwzględnych wartości współczynników.
+
+```{r}
+hist(abs(en_coef[en_coef!=0]),breaks=50,xlab="Wartości współczynników", ylab="Zliczenia", main="Wykres 3 - histogram wartości współczynników \n modelu Elastic Net")
+```
+
+Na Wykresie 3 widoczne jest, że rzeczywiście przeważająca liczba współczynników modelu jest bliska zera - co może być oznaką przeuczenia.
+
+Pomimo niepokojącego zachowania modelu obliczono kilka jego statystyk.
+
+Średni błąd walidacyjny równy był:
+
+```{r}
+cv.error[4]
+```
+
+Współczynnik $R^2$ modelu równy był:
+
+```{r}
+cv0.6$glmnet.fit$dev.ratio[match(cv0.6$lambda.min,cv0.6$lambda)]
+
+```
+
+która to wartość wskazuje, że model wyjaśnił dużą część zmienności zmiennej objaśnianej
+
+Obliczono również błąd średniokwadratowy modelu:
+
+```{r}
+(as.matrix(Xtrain)%*%en_coef-as.matrix(Ytrain))^2 %>% mean
+```
+
+# 3. Analiza danych z wykorzystaniem modelu lasów losowych
+
+## a) Wybór hiperparametrów lasu losowego
+
+Zanim przystąpiono do nauki końcowego modelu lasu losowego, należało podjąć decyzję o hiperparametrach tego modelu. Zachowaniem lasu losowego sterowano z wykorzystaniem parametrów *ntree* (liczb drzew losowych tworzonych podczas konstrukcji lasu) oraz *mtry* (liczba zmiennych wykorzystywanych do konstrukcji pojedynczego drzewa). Testowano hiperparametry z zakresu:
+
+$$
+ntree\in\{100,300,500\}\\
+mtry\in\{20,40,60\}
+$$
+
+Dla każdej z kombinacji tych parametrów przeprowadzono kroswalidację - wyuczono po kolei las losowy na 5 podzbiorach zbioru treningowego i obliczano błąd walidacyjny predykcji danego modelu na zbiorze testowym. Ostateczne wyniki zaprezentowano w tabeli *results*, gdzie dla każdej kombinacji hiperparametrów podano uśredniony błąd walidacyjny.
+
+```{r}
+results<-c(0,0,0)
+
+for(proby in c(20, 40, 60)){
+for(drzewa in c(100, 300, 500)){
+  a<-0
+  
+for(p in 1:5){
+  #tworzymy model lasu
+  las<-randomForest(x=as.matrix(Xtrain[podzbiory!=p,]), y=Ytrain[podzbiory!=p,1], ntree=drzewa, mtry=proby)
+  
+  #obliczamy MSE dla czesci testowej 
+ a1<-mean( ( predict(las, as.matrix(Xtrain[podzbiory==p,]))-Ytrain[podzbiory==p,1] )^2 )
+ 
+ #dla kazdej kombinacji mtry i ntree tworzymy wektor MSE dlugosci p
+ a<-c(a,a1)
+}
+  
+  results<-cbind(results, c(proby, drzewa, mean(a[-1])) )
+}
+}
+
+results<-results[,-1]
+rownames(results)<-c("mtry", "ntree", "mse")
+
+rm(a)
+rm(a1)
+rm(p)
+rm(proby)
+rm(drzewa)
+rm(las)
+```
+
+Podsumowanie powyższej analizy znajduje się poniżej:
+
+```{r}
+results<-round(results,4)
+print(results) 
+```
+
+Z powyższej tabeli widać, że generalnie dokładność modelu rosła wraz z wartościami *mtry* i *ntree*, przy czym uwzględnienie większej liczby zmiennych (*mtry*) dawało o bardziej znaczącą poprawę dokładności. Zadecydowano by przyjąć wartość *ntree=*300, co, jak się sądzi, jest akceptowalnym kompromisem pomiędzy długością czasu obliczeń a dokładnością modelu. Ponieważ jednak maksymalna rozpatrywana wartość *mtry*=60 jest mniejsza od tej zalecanej przez literaturę - $\sqrt{9000}\simeq 95$ - zadecydowano o przeprowadzeniu następnej kroswalidacji, tym razem jedynie w celu wyboru optymalnej wartości tej jednej zmiennej. Rozważano wartości:
+
+$$
+mtry\in\{60,80,100,120\}
+$$
+
+Kroswalidację przeprowadzono identycznie jak wcześniej, a jej wyniki pokazano w tabeli *results2*.
+
+```{r}
+results2<-c(0,0)
+
+for(proby in c(60, 80, 100,120)){
+  a<-0
+  
+for(p in 1:5){
+  #tworzymy model lasu
+  las<-randomForest(x=as.matrix(Xtrain[podzbiory!=p,]), y=Ytrain[podzbiory!=p,1], ntree=300, mtry=proby)
+  
+  #obliczamy MSE dla czesci testowej 
+ a1<-mean( ( predict(las, as.matrix(Xtrain[podzbiory==p,]))-Ytrain[podzbiory==p,1] )^2 )
+ 
+ #dla kazdej wartości mtry tworzymy wektor MSE dlugosci p
+ a<-c(a,a1)
+}
+  
+  results2<-cbind(results2, c(proby, mean(a[-1])) )
+}
+
+results2<-results2[,-1]
+rownames(results2)<-c("mtry", "mse")
+
+rm(a)
+rm(a1)
+rm(p)
+rm(proby)
+rm(las)
+```
+
+Wyniki kroswalidacji zaprezentowano w tabeli *results2*:
+
+```{r}
+results2
+```
+
+Ostatecznie zadecydowano o wytrenowaniu modelu llasu losowego z hiperparametrami *ntree=300* i *mtry*=120.
+
+```{r}
+las_idealny<-randomForest(x=as.matrix(Xtrain), y=as.matrix(Ytrain), ntree=300, mtry=120)
+```
+
+## b) Porównanie modeli i modelu referencyjnego
+
+Porównano średnie błędy walidacyjne modelu lasów losowych oraz modelu *Elastic Net,* a także błąd średniokwadratowy i współczynnik $R^2$ tych modeli i stałego modelu referencyjnego.
+
+BŁĄD WALIDACYJNY
+
+model EN
+
+```{r}
+cv.error[4]
+```
+
+model LL
+
+```{r}
+results2[2,4]
+```
+
+BŁĄD ŚREDNIOKWADRATOWY
+
+model EN
+
+```{r}
+(as.matrix(Xtrain)%*%en_coef-as.matrix(Ytrain))^2 %>% mean
+```
+
+model LL
+
+```{r}
+(predict(las_idealny,as.matrix(Xtrain))-as.matrix(Ytrain))^2 %>% mean
+```
+
+model ref.
+
+```{r}
+(as.matrix(Ytrain)-mean(as.matrix(Ytrain)))^2 %>% mean
+```
+
+WSPÓŁCZYNNIK $R^2$
+
+model EN
+
+```{r}
+cv0.6$glmnet.fit$dev.ratio[match(cv0.6$lambda.min,cv0.6$lambda)]
+
+```
+
+model LL
+
+```{r}
+RSE<-sum((predict(las_idealny,as.matrix(Xtrain))-as.matrix(Ytrain))^2)
+RSS<-sum((as.matrix(Ytrain)-mean(as.matrix(Ytrain)))^2)
+print((RSS-RSE)/RSS)
+```
+
+model ref.
+
+```{r}
+print(0)
+```
+
+Średni błąd walidacyjny dla modelu lasów losowych jest o ok. 2% wyższy od błędu walidacyjnego obliczonego dla modelu *Elastic Net* - jest to niewiele i pod tym względem oba modele są porównywalne. Warto jednak zauważyć, że model lasów losowych modeluje dane treningowe ze znacznie lepszą dokładnością (por. MSE i $R^2$) niż model *Elastic* *Net* (model referencyjny spisuje się tu zupełnie tragicznie). Nie jest to jednak duża zaleta modelu, którego jakość powinno się oceniać raczej poprzez wartość błędu walidacyjnego. Błąd średniokwadratowy o wiele niższy niż średni błąd walidacyjny jest przesłanką wskazującą na przeuczenie modelu. Jednakże podkreśla się, że pomimo prawdopodobnego przeuczenia modelu lasów losowych, daje on prawie taki sam błąd walidacyjny, co model *Elastic Net*, zatem oba modele spisują się więc prawie tak samo dobrze.
+
+Jednakże ostatecznie trzeba wybrać, który model wykorzysta się do dokonania finalnej predykcji.
+
+Albo i nie trzeba. Modele lasów lasowych i *Elastic Net* zostały wytrenowane w zupełnie inny sposób. Uzasadnione jest zatem założenie, że błędy ich predykcji poza zbiorem trenignowym są nieskorelowane lub przynajmniej niskoskorelowe. Zatem jeśli jako ostateczną predykcje weźmie się średnią z predykcji obu modeli, to wariancja błędów predykcji powinna zmaleć ok. (?) $\sqrt{2}$ raza. Co więcej w najgorszym przypadku, jeśli predykcje są mocno skorelowane, to wzięcie średniej z modeli nie powinno mieć żadnego wpływu na ostateczny wynik - a więc także wpływu negatywnego.
+
+# 4. Predykcja na zbiorze testowym
+
+```{r}
+pred_EN_train<-as.vector(as.matrix(Xtrain)%*%en_coef)
+pred_EN_test<-as.vector(as.matrix(Xtest)%*%en_coef)
+pred_LL_train<-predict(las_idealny,as.matrix(Xtrain))
+pred_LL_test<-predict(las_idealny,as.matrix(Xtest))
+```
+
+Przed dokonaniem samej predykcji można jeszcze ulepszyć nieco model. W 1 części tej analizy stwierdzono, że na ok. 21% komórek ze zbioru treningowego nie stwierdzono w ogóle obecności białka CD36. Można z dużą pewnością stwierdzić, że jest to stała dla całej populacji. Obliczono jakie są pod tym względem przewidywania obu modeli.
+
+```{r}
+length(pred_EN_train[pred_EN_train==0])/3794
+length(pred_LL_train[pred_LL_train==0])/3794
+length(pred_EN_test[pred_EN_test==0])/670
+length(pred_LL_test[pred_LL_test==0])/670
+```
+
+Jak można zauważyć, modele nie przewidują, że na jakiejś komórce będzie dokładnie 0 białka CD36. Można więc jeszcze zadać pytanie, na jakim procencie komórek znajdują się ujemne ilości białka.
+
+```{r}
+length(pred_EN_train[pred_EN_train<0])/3794
+length(pred_LL_train[pred_LL_train<0])/3794
+length(pred_EN_test[pred_EN_test<0])/670
+length(pred_LL_test[pred_LL_test<0])/670
+```
+
+Jak można się było spodziewać **liniowy** model regresji przewiduje, że na 1.3-2.2% komórek będą ujemne ilości białka. Model lasów losowych (oparty w dużej mierze o branie średniej) nie przewiduje takich zjawisk.
+
+By usunąć tę degenerację modelu obliczono jaka jest najmniejsza mierzalna ilość białka CD36 w zbiorze treningowym.
+
+```{r}
+min(Ytrain[Ytrain>0])
+```
+
+Można zatem zastąpić każdą wartość predykcji mniejszą od powyższej przez 0. Można też zastąpić zerem najmniejsze 20,954% wartości ze zbioru predykcji. Jeśli modele zostały skonstruowane poprawnie, to operacje te powinny być zasadniczo równoważne.
+
+Obliczono odpowiednie kwantyle dla predykcji obu modeli dla wszystkich obserwacji. Dla modelu *Elastic Net* otrzymano:
+
+```{r}
+quantile(c(pred_EN_train,pred_EN_test),0.20954)
+```
+
+a dla modelu lasów losowych:
+
+```{r}
+quantile(c(pred_LL_train,pred_LL_test),0.20954)
+```
+
+W rzeczywistości niezerowych obserwacji o wartościach mniejszych od 0.2164254 było:
+
+```{r}
+length(Ytrain[0.2164>Ytrain][Ytrain[0.2164>Ytrain]>0])
+```
+
+a niezerowych obserwacji mniejszych od 0.2347352:
+
+```{r}
+length(Ytrain[0.2347>Ytrain][Ytrain[0.2347>Ytrain]>0])
+```
+
+Ze względu na chęć późniejszego uśredniania predykcji, koniecznie było użycie jednego progu "cięcią". Zdecydowano się na większą z obliczonych wartości i przyjęto na poziomie istotności $0.5\%\simeq 20/3794$ , że w przedziale $(0,0.2347352)$ nie powinno być żadnych predykcji. Problem jedynie polegał na to, czy te predykcje były błędnymi predykcjami 0, czy błędnymi predykcjami wyższych wartości. Przetestowano to na modelu *Elastic Net* (który nie był tak przeuczony jak model lasów losowych) minimalizując MSE na dyskretnym zbiorze wartości.
+
+```{r}
+pred_EN_train<-as.vector(as.matrix(Xtrain)%*%en_coef)
+cut<-0
+for(k in seq(0,0.23, 0.001))
+  {
+for(i in 1:3794)
+{
+  if(pred_EN_train[i]<k){pred_EN_train[i]<-0}
+}
+  cut<-c(cut,mean((pred_EN_train-as.matrix(Ytrain))^2))
+}
+cut<-cut[-1]
+match(min(cut),cut)
+
+```
+
+Wynik wskazuje, że można wyzerować predykcje mniejsze od 0.002.
+
+Sprawdzono, czy wskazane jest obcinanie predykcji w górnej części "zdegenerowanego" obszaru.
+
+```{r}
+pred_EN_train<-as.vector(as.matrix(Xtrain)%*%en_coef)
+cut<-0
+for(k in seq(0,0.229, 0.001))
+  {
+for(i in 1:3794)
+{
+  if(pred_EN_train[i]>k | pred_EN_train[i]<0.23){pred_EN_train[i]<-0.23}
+}
+  cut<-c(cut,mean((pred_EN_train-as.matrix(Ytrain))^2))
+}
+cut<-cut[-1]
+match(min(cut),rev(cut))
+```
+
+Wynik wskazuje, że nie jest wskazane obcinanie obserwacji od góry.
+
+Uśredniono predykcję na zbiorze testowym.
+
+```{r}
+predictions<-(pred_EN_test+pred_LL_test)/2
+```
+
+Chciano w tym moemencie wyzerować predykcje mniejsze od 0.002, ale ponieważ jest ich dokładnie:
+
+```{r}
+length(predictions[predictions<0.002])
+```
+
+to nie jest to potrzebne.
+
+```{r}
+ID<-0:669
+predictions<-cbind(ID,predictions)
+colnames(predictions)<-c("Id","Expected")
+write.csv(predictions, file="421430_predykcja.csv", row.names=FALSE)
+```
