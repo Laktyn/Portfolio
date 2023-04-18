@@ -1,2 +1,2 @@
 # Portfolio
-Some of my C++ and Python projects, that I'm (quite) proud of.
+Some of my Python (and C++ and R) projects, that I'm (quite) proud of.
