@@ -1,3 +1,8 @@
+# A library containing functions that I personally use (and of course wrote) to analyze optical spectra of laser pulses measured by 
+# Optical Spectrum Analyzer (OSA). Large part of the functions is focused on interference patterns analysis - usually some kind of fringes.
+# Spectra are read from .tsv files and contain two columns: "Wavelength" and corresponding spectral "Intensity".
+# The library is expected to be hugely extended.
+
 def find_period(spectrum, height = 1, hist = False):
     '''
     Function finds period in interference fringes by looking for wavelengths, where intensity is around given height and is decreasing. 
