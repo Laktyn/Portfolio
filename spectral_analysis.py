@@ -75,37 +75,37 @@ def constant_spacing(spectrum):
 
     length = spectrum.shape[0]
 
-    freq = spectrum.values[:, 0]
-    int = spectrum.values[:, 1]
+    freq = spectrum.values[:, 0].copy()
+    intens = spectrum.values[:, 1].copy()
 
     new_freq = np.linspace(start = freq[0], stop = freq[-1], num = length, endpoint = True)
-    new_int = []
+    new_intens = []
 
-    j = 0
+    j = 1
     for f in range(length):         # each new interpolated intensity
         interpolated_int = 0
+        
+        if f == 0:
+            new_intens.append(intens[0])
+            continue
+
+        if f == length - 1:
+            new_intens.append(intens[length - 1])
+            continue
 
         for i in range(j, length):     # we compare with "each" measured intensity
 
-            if new_freq[f] < freq[i]:
-                if i < length - 1:
-                    next_freq = freq[i+1]
-                    next_int = int[i+1]
-
-                else:
-                    next_freq = freq[i]
-                    next_int = int[i] 
+            if new_freq[f] <= freq[i]: # so for small i that's false. That's true for the first freq[i] greater than new_freq[f]
                 
-                interpolated_int = linear_inter(freq[i], next_freq, new_freq[f], int[i], next_int)
+                interpolated_int = linear_inter(freq[i - 1], freq[i], new_freq[f], intens[i-1], intens[i])
                 break
 
             else:
-                i += 1
-                j += 1
+                j += 1 # j is chosen in such a way, because for every new "freq" it will be greater than previous
 
-        new_int.append(interpolated_int)
+        new_intens.append(interpolated_int)
 
-    data = [[new_freq[i], new_int[i]] for i in range(length)]
+    data = [[new_freq[i], new_intens[i]] for i in range(length)]
     df_spectrum = pd.DataFrame(data)
 
     return df_spectrum
@@ -203,7 +203,7 @@ def fourier(spectrum, absolute = False):
 
     import numpy as np
     import pandas as pd
-    from scipy.fft import fft, fftfreq
+    from scipy.fft import fft, fftfreq, fftshift
 
     freq = spectrum.values[:, 0]
     intens = spectrum.values[:, 1]
@@ -212,16 +212,13 @@ def fourier(spectrum, absolute = False):
     # Fourier Transform
 
     if absolute:
-        FT_intens = np.abs(fft(intens))
+        FT_intens = np.abs(fftshift(fft(intens, norm = "ortho")))
     else:
-        FT_intens = fft(intens)
+        FT_intens = fftshift(fft(intens, norm = "ortho"))
 
-    time = fftfreq(len(freq), spacing)
+    time = fftshift(fftfreq(len(freq), spacing))
 
-    # just sort data to make slicing later possible
-
-    data = [[time[i], FT_intens[i]] for i in range(len(time))]
-    data.sort()
+    data = np.transpose(np.stack((time, FT_intens)))
 
     return pd.DataFrame(data)
 
@@ -242,7 +239,7 @@ def inv_fourier(spectrum, absolute = False):
 
     import numpy as np
     import pandas as pd
-    from scipy.fft import ifft, fftfreq
+    from scipy.fft import ifft, fftfreq, fftshift
 
     time = spectrum.values[:, 0]
     intens = spectrum.values[:, 1]
@@ -251,21 +248,23 @@ def inv_fourier(spectrum, absolute = False):
     # Fourier Transform
 
     if absolute:
-        FT_intens = np.abs(ifft(intens))
+        FT_intens = np.abs(ifft(intens, norm = "ortho"))
     else:
-        FT_intens = ifft(intens)
-    freq = fftfreq(len(time), spacing)
+        FT_intens = ifft(intens, norm = "ortho")
+    freq = fftshift(fftfreq(len(time), spacing))
 
     # just sort data to make slicing later possible
-
+    '''
     data = [[freq[i], FT_intens[i]] for i in range(len(freq))]
     data.sort()
+    '''
+    data = np.transpose(np.stack((freq, FT_intens)))
 
     return pd.DataFrame(data)
 
-def cut(spectrum, start, end, percentage = False):
+def cut(spectrum, start, end, how = "units"):
     '''
-    Returns the \"spectrum\" limited to the borders.
+    Returns the \"spectrum\" limited to the borders. 
 
     ARGUMENTS:
 
@@ -275,7 +274,7 @@ def cut(spectrum, start, end, percentage = False):
 
     end - end of the segment, to which the spectrum is limited.
 
-    percentage - if \"False\" then \"start\" and \"end\" mean the indices of border observations. Otherwise they are in [0, 1] and the border observations' indices are \"start*len(spectrum)\" and \"end*len(spectrum)\".
+    how - defines meaning of \"start\" and \"end\". If \"units\", then those are values on X-axis. If \"fraction\", then the fraction of length of X-axis. If \"index\", then corresponding indices of border observations.
     
     RETURNS:
 
@@ -285,12 +284,27 @@ def cut(spectrum, start, end, percentage = False):
 
     import pandas as pd
     import numpy as np
+    from math import floor
 
-    cut_spectrum = pd.DataFrame(spectrum.values[start:end, :]) 
+    if how == "units":
+        s = np.searchsorted(spectrum.values[:, 0], start)
+        e = np.searchsorted(spectrum.values[:, 0], end)
+        cut_spectrum = pd.DataFrame(spectrum.values[s: e, :])
+
+    elif how == "fraction":
+        s = floor(start*spectrum.shape[0])
+        e = floor(end*spectrum.shape[0])
+        cut_spectrum = pd.DataFrame(spectrum.values[s:e, :])
+
+    elif how == "index":
+        cut_spectrum = pd.DataFrame(spectrum.values[start:end, :]) 
+
+    else:
+        raise ValueError("Argument not defined.")
 
     return cut_spectrum
 
-def plot(spectrum, color = "darkviolet", title = "Spectrum", type = "wl"):
+def plot(spectrum, color = "darkviolet", title = "Spectrum", type = "wl", what_to_plot = "abs", min = 0, max = 0):
     '''
     Fast spectrum plotting using matplotlib.pyplot library.
 
@@ -312,25 +326,84 @@ def plot(spectrum, color = "darkviolet", title = "Spectrum", type = "wl"):
     import pandas as pd
     import numpy as np
     import matplotlib.pyplot as plt
+    from math import floor, log10
+
+    spectrum_safe = spectrum.copy()
+    
+    # simple function to round to significant digits
+
+    def round_to_dig(x, n):
+        return round(x, -int(floor(log10(abs(x)))) + n - 1)
+
+    # invalid arguments
 
     if type not in ("wl", "freq", "time"):
-        raise Exception("Type not defined.")
+        raise Exception("Input \"type\" not defined.")
+    
+    if what_to_plot not in ("abs", "imag", "real"):
+        raise Exception("Input \"what_to_plot\" not defined.")
 
-    plt.plot(spectrum.values[:, 0], spectrum.values[:, 1], color = color)
+    # if we dont want to plot whole spectrum
+
+    n_points = len(spectrum_safe.values[:, 0])
+
+    to_cut = min != max
+    if to_cut:
+
+        inf = round(np.real(spectrum_safe.values[0, 0].copy()))
+        sup = round(np.real(spectrum_safe.values[-1, 0].copy()))
+
+        s = np.searchsorted(spectrum_safe.values[:, 0], min)
+        e = np.searchsorted(spectrum_safe.values[:, 0], max)
+        spectrum_safe = pd.DataFrame(spectrum_safe.values[s: e, :])
+
+    values = spectrum_safe.values[:, 1].copy()
+    X = spectrum_safe.values[:, 0].copy()
+    
+    # what do we want to have on Y axis
+
+    if what_to_plot == "abs":
+        values = np.abs(values)
+    if what_to_plot == "real":
+        values = np.real(values)
+    if what_to_plot == "imag":
+        values = np.imag(values)
+
+    # start to plot
+
+    f, ax = plt.subplots()
+    plt.plot(X, values, color = color)
     plt.grid()
-    plt.title(title)
+    if to_cut:
+        plt.title(title + " [only part shown]")
+    else:
+        plt.title(title)
+    plt.ylabel("Intensity")    
     if type == "wl":
         plt.xlabel("Wavelength [nm]")
+        unit = "nm"
     if type == "freq":
         plt.xlabel("Frequency [THz]")
+        unit = "THz"
     if type == "time":
         plt.xlabel("Time [ps]")
-    plt.ylabel("Intensity")
+        unit = "ps"
+
+    # quick stats
+
+    spacing = round_to_dig(np.mean(np.diff(np.real(X))), 3)
+    p_per_unit = floor(1/np.mean(np.diff(np.real(X))))
+
+    if to_cut:
+        plt.text(1.05, 0.85, "Number of points: {}\nX-axis spacing: {} ".format(n_points, spacing) + unit + "\nPoints per 1 " + unit +": {}".format(p_per_unit) + "\nFull X-axis range: {} - {} ".format(inf, sup) + unit , transform = ax.transAxes)
+    else:
+        plt.text(1.05, 0.9, "Number of points: {}\nX-axis spacing: {} ".format(n_points, spacing) + unit + "\nPoints per 1 " + unit +": {}".format(p_per_unit) , transform = ax.transAxes)
+
     plt.show()
 
 def shift(spectrum, shift):
     '''
-    Shifts the spectrum on X axis.
+    Shifts the spectrum by X axis. Warning: only values on X axis are modified.
 
     ARGUMENTS:
 
@@ -346,6 +419,77 @@ def shift(spectrum, shift):
     import numpy as np
 
     data = spectrum.values
-    data[:, 0] = data[:, 0] + shift
+    new_data = data.copy()
+    new_data[:, 0] = new_data[:, 0] + shift
 
+    return pd.DataFrame(new_data)
+
+def zero_padding(spectrum, how_much):
+    '''
+    Add zeros on Y-axis to the left and right of data with constant (mean) spacing on X-axis.
+    '''
+    import pandas as pd
+    import numpy as np
+    from math import floor
+
+    length = floor(how_much*spectrum.shape[0])
+    spacing = np.mean(np.diff(spectrum.values[:, 0]))
+    
+    left_start = spectrum.values[0, 0] - spacing*length
+    left = np.linspace(left_start, spectrum.values[0, 0], endpoint = False, num = length - 1)
+    left_arr = np.transpose(np.stack((left, np.zeros(length-1))))
+
+    right_end = spectrum.values[-1, 0] + spacing*length
+    right = np.linspace(spectrum.values[-1, 0] + spacing, right_end, endpoint = True, num = length - 1)
+    right_arr = np.transpose(np.stack((right, np.zeros(length-1))))
+
+    arr_with_zeros = np.concatenate([left_arr, spectrum.values, right_arr])
+
+    return pd.DataFrame(arr_with_zeros)
+
+def replace_with_zeros(spectrum, start, end):
+    '''
+    description
+    '''
+
+    import numpy as np
+    import pandas as pd
+
+    data = spectrum.values.copy()
+    if start == "min":
+        s = 0
+    else:
+        s = np.searchsorted(spectrum.values[:, 0], start)
+
+    if end == "max":
+        e = spectrum.shape[0]
+    else:
+        e = np.searchsorted(spectrum.values[:, 0], end)
+
+    data[s: e, 1] = np.zeros(e-s)
+
+    return pd.DataFrame(data)
+
+def smart_shift(spectrum, shift):
+    '''
+    Shift spectrum by X axis. Values on X axis are NOT modified. Some of the values on Y axis are deleted, \"empty\" values are zero by default.
+    '''
+
+    import numpy as np
+    import pandas as pd
+    from math import floor
+
+    data = spectrum.values.copy()
+    spacing = np.mean(np.diff(data[:, 0]))
+    index_shift = floor(shift/np.real(spacing))
+
+    # why doesnt it work?
+    ''' 
+    if index_shift >= 0:
+        data[-index_shift:, 1] = np.zeros(data[-index_shift:, 1].shape)
+    if index_shift <= 0:
+        data[:-index_shift, 1] = np.zeros(data[:-index_shift, 1].shape)
+    '''
+    data[:, 1] = np.roll(data[:, 1], index_shift)
+        
     return pd.DataFrame(data)
